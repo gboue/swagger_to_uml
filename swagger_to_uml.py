@@ -76,6 +76,9 @@ class Property:
             type_dict = d
         elif 'schema' in d:
             type_dict = d['schema']
+        elif 'content' in d:
+            content = list(d['content'].values())[0]
+            type_dict = content['schema']
         elif 'allOf' in d and len(d['allOf']) > 0:
             type_dict = d['allOf'][0]
         else:
@@ -180,14 +183,16 @@ class Property:
 
 
 class Definition:
-    def __init__(self, name, type, properties, relationships):
+    def __init__(self, name, type, properties, enum_values, relationships):
         self.name = name  # type: str
         self.type = type  # type: str
+        self.enum_values = enum_values # type : List[str]
         self.properties = properties  # type: List[Property]
         self.relationships = relationships  # type: Set[str]
 
     @staticmethod
     def from_dict(name, d):
+
         properties = []  # type: List[Property]
         for property_name, property in d.get('properties', {}).items():
             properties.append(Property.from_dict(
@@ -196,30 +201,77 @@ class Definition:
                 required=property_name in d.get('required', [])
             ))
 
+        enum_values = []
+        if ('enum' in d):
+            enum_values = d['enum']
+
         if not 'type' in d:
             print('required key "type" not found in dictionary ' + json.dumps(d), file=sys.stderr)
 
         return Definition(name=name,
                           type=d['type'],
                           properties=properties,
+                          enum_values=enum_values,
                           relationships={property.ref_type for property in properties if property.ref_type})
 
     @property
     def uml(self):
-        result = 'class {name} {{\n'.format(name=self.name)
 
-        # required properties first
-        for property in sorted(self.properties, key=lambda x: x.required, reverse=True):
-            result += '    {property_str}\n'.format(property_str=property.uml)
+        if self.type == 'object':
+            result = 'class {name} {{\n'.format(name=self.name)
 
-        result += '}\n\n'
+            # required properties first
+            for property in sorted(self.properties, key=lambda x: x.required, reverse=True):
+                result += '    {property_str}\n'.format(property_str=property.uml)
 
-        # add relationships
-        for relationship in sorted(self.relationships):
-            result += '{name} ..> {relationship}\n'.format(name=self.name, relationship=relationship)
+            result += '}\n\n'
+
+            # add relationships
+            for relationship in sorted(self.relationships):
+                result += '{name} ..> {relationship}\n'.format(name=self.name, relationship=relationship)
+
+
+        elif self.type == 'string' and len(self.enum_values) > 0:
+
+            result = 'enum {name} {{\n'.format(name=self.name)
+
+            # get all enum values
+            for enum_value in sorted(self.enum_values):
+                result += '    {enum_value}\n'.format(enum_value=enum_value)
+
+            result += '}\n\n'
+        else:
+            import pdb
+            pdb.set_trace()
 
         return result
 
+
+
+class RequestBody:
+    def __init__(self, ref_type):
+        self.ref_type = ref_type
+
+    @staticmethod
+    def from_dict(whole, d):
+        ref = None
+
+        if 'content' in d:
+            content = list(d['content'].values())[0]
+            schema = content['schema']
+            ref = schema.get('$ref')
+            ref = resolve_ref(ref)
+
+        #if ref != None:
+        #    d = whole['parameters'][resolve_ref(ref)]
+
+        return RequestBody(ref)
+
+    @property
+    def uml(self):
+        return '{ref_type}'.format(
+            ref_type=self.ref_type
+        )
 
 class Parameter:
     def __init__(self, name, location, description, required, property):
@@ -231,9 +283,12 @@ class Parameter:
 
     @staticmethod
     def from_dict(whole, d):
+
         ref = d.get('$ref')
+
         if ref != None:
             d = whole['parameters'][resolve_ref(ref)]
+
         return Parameter(
             name=d['name'],
             location=d['in'],
@@ -266,7 +321,7 @@ class Response:
 
 
 class Operation:
-    def __init__(self, path, type, summary, description, responses, tags, parameters):
+    def __init__(self, path, type, summary, description, responses, tags, parameters, requestBody):
         self.path = path  # type: str
         self.type = type  # type: str
         self.summary = summary  # type: Optional[str]
@@ -274,12 +329,18 @@ class Operation:
         self.responses = responses  # type: List[Response]
         self.tags = tags  # type: List[str]
         self.parameters = parameters  # type: List[Parameter]
+        self.requestBody=requestBody # type : ref
 
     def __lt__(self, other):
         return self.type < other.type
 
     @staticmethod
     def from_dict(whole, path, type, d, path_parameters):
+
+        requestBody = []
+        if 'requestBody' in d:
+            requestBody = [RequestBody.from_dict(whole, d.get('requestBody', {}))]
+
         return Operation(
             path=path,
             type=type,
@@ -287,7 +348,8 @@ class Operation:
             description=d.get('description'),
             tags=d.get('tags'),
             responses=[Response.from_dict(whole, status, response) for status, response in d['responses'].items()],
-            parameters=path_parameters + [Parameter.from_dict(whole, param) for param in d.get('parameters', [])]
+            parameters=path_parameters + [Parameter.from_dict(whole, param) for param in d.get('parameters', [])],
+            requestBody=requestBody
         )
 
     @property
@@ -304,9 +366,14 @@ class Operation:
             for parameter in [x for x in self.parameters if x.location == parameter_type]:
                 parameter_strings.append('{parameter_uml}'.format(parameter_uml=parameter.property.uml))
 
+        if len(self.requestBody) > 0:
+            parameter_strings.append('.. requestBody ..')
+            parameter_strings.append(self.requestBody[0].ref_type)
+
         # collect references from responses and parameters
         references = [x.property.ref_type for x in self.responses if x.property.ref_type] + \
-                     [x.property.ref_type for x in self.parameters if x.property.ref_type]
+                     [x.property.ref_type for x in self.parameters if x.property.ref_type] + \
+                     [x.ref_type for x in self.requestBody if x.ref_type]
 
         return """class "{name}" {{\n{parameter_str}\n.. responses ..\n{response_str}\n}}\n\n{associations}\n""".format(
             name=self.name,
@@ -353,7 +420,11 @@ class Swagger:
 
     @staticmethod
     def from_dict(d):
-        definitions = [Definition.from_dict(name, definition) for name, definition in d.get('definitions',{}).items()]
+        definition_elements=d.get('definitions',{})
+        components = d.get('components',{})
+        schemas = components.get('schemas',{})
+        schemas.update(definition_elements)
+        definitions = [Definition.from_dict(name, definition) for name, definition in schemas.items()]
         paths = [Path.from_dict(d, path_name, path) for path_name, path in d['paths'].items()]
         return Swagger(definitions=definitions, paths=paths)
 
