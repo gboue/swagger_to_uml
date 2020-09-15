@@ -182,6 +182,50 @@ class Property:
         return result
 
 
+class Info:
+    def __init__(self, title, description, version):
+        self.title = title  # type: str
+        self.description = description  # type: str
+        self.version = version # type: str
+
+    def __init__(self, infos):
+
+        if 'title' in infos:
+            self.title = infos['title']  # type: str
+
+        if 'description' in infos:
+            self.description = infos['description']  # type: str
+
+        if 'version' in infos:
+            self.version = infos['version']  # type: str
+
+    @staticmethod
+    def from_dict(infos):
+
+        for key in ['title', 'description', 'version']:
+            if not key in infos:
+                print('warning key "%s" not found in dictionary %s' % (key, json.dumps(infos)), file=sys.stderr)
+
+        return Info(infos=infos)
+
+    @property
+    def uml_header(self):
+
+        res = ""
+        if self.title is not None and self.description is not None:
+            res = """center header\n%s\n%s\n\nendheader""" % (self.title, self.description)
+
+        return res
+
+    @property
+    def uml_footer(self):
+
+        res = ""
+        if self.version is not None:
+            res = """center footer\n\nVersion %s\nendfooter""" % (self.version,)
+
+        return res
+
 class Definition:
     def __init__(self, name, type, properties, enum_values, relationships):
         self.name = name  # type: str
@@ -213,7 +257,6 @@ class Definition:
                           properties=properties,
                           enum_values=enum_values,
                           relationships={property.ref_type for property in properties if property.ref_type})
-
     @property
     def uml(self):
 
@@ -242,7 +285,7 @@ class Definition:
             result += '}\n\n'
         else:
             import pdb
-            pdb.set_trace()
+            #pdb.set_trace()
 
         return result
 
@@ -414,19 +457,21 @@ class Path:
 
 
 class Swagger:
-    def __init__(self, definitions, paths):
+    def __init__(self, definitions, paths, info):
         self.definitions = definitions  # type: List[Definition]
         self.paths = paths  # type: List[Path]
+        self.info = info
 
     @staticmethod
     def from_dict(d):
         definition_elements=d.get('definitions',{})
+        info = Info.from_dict(d.get('info',{}))
         components = d.get('components',{})
         schemas = components.get('schemas',{})
         schemas.update(definition_elements)
         definitions = [Definition.from_dict(name, definition) for name, definition in schemas.items()]
         paths = [Path.from_dict(d, path_name, path) for path_name, path in d['paths'].items()]
-        return Swagger(definitions=definitions, paths=paths)
+        return Swagger(definitions=definitions, paths=paths,info = info)
 
     @staticmethod
     def from_file(filename):
@@ -439,10 +484,16 @@ class Swagger:
 
     @property
     def uml(self):
-        uml_str = '@startuml\nhide empty members\nset namespaceSeparator none\n\n{paths}\n{definitions}\n@enduml\n'
+        uml_str = '@startuml\nhide empty members\nset namespaceSeparator none\n\n{header}\n\n{paths}\n{definitions}\n\n{footer}\n@enduml\n'
+
+        import pdb
+        #pdb.set_trace()
+
         return uml_str.format(
+            header= self.info.uml_header,
             paths='\n\n'.join([d.uml for d in self.paths]),
-            definitions='\n\n'.join([d.uml for d in self.definitions])
+            definitions='\n\n'.join([d.uml for d in self.definitions]),
+            footer= self.info.uml_footer,
         )
 
 
